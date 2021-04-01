@@ -12,38 +12,146 @@ global.XMLSerializer = window.XMLSerializer
 global.navigator = window.navigator
 const { mxGraph: MXGraph, mxCodec: MXCodec, mxUtils: { getXml } } = require('mxgraph')()
 
-const createGraph = async (vertexes = [], edges = []) => {
+const sortElements = (elementA = {}, elementB = {}) => {
+  if ((elementA.id === elementB.parentId) || (elementA.parentId === null && elementB.parentId !== null)) return -1
+  else if ((elementA.parentId === elementB.id) || (elementB.parentId === null && elementA.parentId !== null)) return 1
+  else return 0
+}
+
+const getParentIndex = document => {
+  const { 'xmi:XMI': { 'uml:Model': [rootElement] } } = document
+
+  const unrollPackagedElements = (element = {}, parentId = null, index = {}) => {
+    const { $: { 'xmi:id': id = null } = {}, packagedElement: packagedElements = [] } = element
+    if (parentId !== null && id !== null) index[id] = parentId
+    index = packagedElements.reduce((accumulator, element) => ({ ...accumulator, ...unrollPackagedElements(element, id, index) }), index)
+    return index
+  }
+
+  const parentIndex = unrollPackagedElements(rootElement)
+  return parentIndex
+}
+
+const getDiagrams = async xml => {
+  const document = await parseStringPromise(xml)
+  let {
+    'xmi:XMI': {
+      'xmi:Extension': [
+        {
+          diagrams: [{ diagram: diagrams = [] } = {}],
+          elements: [{ element: elements = [] } = {}],
+          connectors: [{ connector: connectors = [] } = {}]
+        } = {}
+      ] = []
+    }
+  } = document
+
+  const parentIndex = getParentIndex(document)
+
+  const elementStereotypeIndex = elements
+    .reduce((accumulator, element) => {
+      const { $: { 'xmi:idref': id }, properties: [{ $: { stereotype = null, documentation = null } }] } = element
+      accumulator[id] = { stereotype, documentation }
+      return accumulator
+    }, {})
+
+  const { connectorIndex, elementIndex } = connectors
+    .reduce((accumulator, connector) => {
+      let { $: { 'xmi:idref': id }, extendedProperties: [{ $: { conditional: type = '' } }], source: [source], target: [target] } = connector
+      const { $: { 'xmi:idref': sourceId = null } } = source
+      const { $: { 'xmi:idref': targetId = null } } = target
+      type = type.replace(/[^\w\s]/gi, '').replace(/\r?\n|\r/g, '').trim()
+      accumulator.connectorIndex[id] = { id, sourceId, targetId, type }
+      for (const element of [source, target]) {
+        const { $: { 'xmi:idref': id }, model: [{ $: { type, name } }] } = element
+        const { [id]: { stereotype, documentation } = {} } = elementStereotypeIndex
+        const parentId = parentIndex[id] || null
+        accumulator.elementIndex[id] = { id, parentId, type: stereotype || type, name: name || documentation }
+      }
+      return accumulator
+    }, { connectorIndex: {}, elementIndex: {} })
+
+  diagrams = diagrams
+    .map(diagram => {
+      let {
+        elements: [{ element: elements = [] } = {}],
+        properties: [{ $: properties }],
+        project: [{ $: project }]
+      } = diagram
+      let connectors
+      ({ elements = [], connectors = [] } = elements
+        .map(({ $ }) => $)
+        .reduce((accumulator, element) => {
+          const { subject = null, geometry = null } = element
+          if (typeof geometry === 'string' && geometry) {
+            const { Left: x0 = null, Right: x1 = null, Bottom: y1 = null, Top: y0 = null } = geometry.replace(/;/g, ' ').trim().split(' ')
+              .reduce((accumulator, vertex) => {
+                const [coordinate, value] = vertex.split('=')
+                accumulator[coordinate] = parseInt(value)
+                return accumulator
+              }, {})
+            if (x0 !== null) element.geometry = [x0, y0, x1 - x0, y1 - y0]
+          }
+          if (subject in elementIndex) accumulator.elements.push({ ...elementIndex[subject], ...element })
+          else if (subject in connectorIndex) accumulator.connectors.push({ ...connectorIndex[subject], ...element })
+          return accumulator
+        }, { elements: [], connectors: [] }))
+      elements = elements.sort(sortElements)
+      return { ...properties, ...project, elements, connectors }
+    })
+  return diagrams
+}
+
+const styles = {
+  ArchiMate_ApplicationComponent: 'html=1;outlineConnect=0;whiteSpace=wrap;fillColor=#99ffff;shape=mxgraph.archimate3.application;appType=comp;archiType=square;',
+  ArchiMate_ApplicationFunction: 'html=1;outlineConnect=0;whiteSpace=wrap;fillColor=#99ffff;shape=mxgraph.archimate3.application;appType=func;archiType=rounded;',
+  ArchiMate_ApplicationService: 'html=1;outlineConnect=0;whiteSpace=wrap;fillColor=#99ffff;shape=mxgraph.archimate3.application;appType=serv;archiType=rounded',
+  ArchiMate_DataObject: 'html=1;outlineConnect=0;whiteSpace=wrap;fillColor=#99ffff;shape=mxgraph.archimate3.businessObject;overflow=fill',
+  // used ArchiMate_TechnologyArtifact since ArchiMate_TechnologyObject is not in the mxgraph's shape catalog
+  ArchiMate_TechnologyObject: 'html=1;outlineConnect=0;whiteSpace=wrap;fillColor=#AFFFAF;shape=mxgraph.archimate3.application;appType=artifact;archiType=square;',
+  ArchiMate_TechnologyService: 'html=1;outlineConnect=0;whiteSpace=wrap;fillColor=#AFFFAF;shape=mxgraph.archimate3.application;appType=serv;archiType=rounded',
+  ArchiMate_SystemSoftware: 'html=1;outlineConnect=0;whiteSpace=wrap;fillColor=#AFFFAF;shape=mxgraph.archimate3.tech;techType=sysSw;',
+  Activity: 'html=1;outlineConnect=0;whiteSpace=wrap;fillColor=#ffff99;shape=mxgraph.archimate3.application;appType=func;archiType=rounded;',
+  Class: 'html=1;outlineConnect=0;whiteSpace=wrap;fillColor=#ffff99;shape=mxgraph.archimate3.businessObject;overflow=fill;',
+  Note: 'text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;',
+  // Relations
+  ArchiMate_Access: 'edgeStyle=elbowEdgeStyle;html=1;endArrow=open;elbow=vertical;endFill=0;dashed=1;dashPattern=1 4;',
+  ArchiMate_Assignment: 'endArrow=block;html=1;endFill=1;startArrow=oval;startFill=1;edgeStyle=elbowEdgeStyle;elbow=vertical;',
+  ArchiMate_Realization: 'edgeStyle=elbowEdgeStyle;html=1;endArrow=block;elbow=vertical;endFill=0;dashed=1;',
+  ArchiMate_Serving: 'edgeStyle=elbowEdgeStyle;html=1;endArrow=open;elbow=vertical;endFill=1;',
+}
+
+const getStyle = type => {
+  if (!styles[type]) console.warn(`No style defined for type ${type}`)
+  const style = styles[type] || ''
+  return style
+}
+
+const createGraph = async diagram => {
+  const { elements = [], connectors = [] } = diagram
   const graph = new MXGraph()
   const vertexIndex = {}
   graph.getModel().beginUpdate()
   try {
-    JSON.parse(JSON.stringify(vertexes)).forEach(vertex => {
-      const parentId = vertex.shift()
-      const [id] = vertex
-      const { [parentId]: parent = graph.getDefaultParent() } = vertexIndex
-      const v = graph.insertVertex(parent, ...vertex)
-      vertexIndex[id] = v
-    })
-    edges.forEach(edge => {
-      const { id, type, start, end, style } = edge
-      const source = vertexIndex[start]
-      const target = vertexIndex[end]
-      if (source && target) {
-        graph.insertEdge(graph.getDefaultParent(), id, '', source, target, style)
-      }
-    })
+    elements
+      .forEach(element => {
+        const { id, parentId, name, type, geometry } = element
+        vertexIndex[id] = graph.insertVertex(vertexIndex[parentId] || graph.getDefaultParent(), id, name, ...geometry, getStyle(type))
+      })
+    connectors
+      .forEach(connector => {
+        const { id, type, sourceId, targetId } = connector
+        const sourceVertex = vertexIndex[sourceId]
+        const targetVertex = vertexIndex[targetId]
+        graph.insertEdge(graph.getDefaultParent(), id, '', sourceVertex, targetVertex, getStyle(type))
+      })
   } finally {
-    // Updates the display
     graph.getModel().endUpdate()
   }
   const encoder = new MXCodec()
   const xml = getXml(encoder.encode(graph.getModel()))
   return xml
 }
-
-// this example reads the file synchronously
-// you can read it asynchronously also
-// const xmlString = readFileSync('data/PREEvision.xml', 'utf8')
 
 const getBookmarks = async () => {
   const authenticator = new Authenticator(instance, apiToken)
@@ -90,117 +198,10 @@ const createBookmark = async (graphXml = null, { name = 'diagram', description =
   }
 }
 
-const getParentIndex = document => {
-  // const blacklistTypes = ['uml:Association', 'uml:Dependency', 'uml:Class', 'uml:Package']
-  const { 'xmi:XMI': { 'uml:Model': [rootElement] } } = document
-
-  const unrollPackagedElements = (element = {}, parentId = null, index = {}) => {
-    const { $: { 'xmi:id': id = null } = {}, packagedElement: packagedElements = [] } = element
-    if (parentId !== null && id !== null) index[id] = parentId
-    index = packagedElements.reduce((accumulator, element) => ({ ...accumulator, ...unrollPackagedElements(element, id, index) }), index)
-    return index
-  }
-
-  const parentIndex = unrollPackagedElements(rootElement)
-  return parentIndex
-}
-
-const getDiagrams = async xml => {
-  const document = await parseStringPromise(xml)
-  let {
-    'xmi:XMI': {
-      'xmi:Extension': [
-        {
-          diagrams: [{ diagram: diagrams = [] } = {}],
-          elements: [{ element: elements = [] } = {}],
-          connectors: [{ connector: connectors = [] } = {}]
-        } = {}
-      ] = []
-    }
-  } = document
-
-  const connectorElementIndex = connectors
-    .reduce((accumulator, { source: [source], target: [target] }) => {
-      [source, target]
-        .forEach(({ $: { 'xmi:idref': id }, model: [{ $: { type, name }}] }) => {
-          accumulator[id] = { id, type, name }
-        })
-      return accumulator
-    }, {})
-
-  const { connectorIndex, elementIndex } = connectors
-    .reduce((accumulator, connector) => {
-      let { $: { 'xmi:idref': id }, extendedProperties: [{ $: { conditional: type = '' } }], source: [source], target: [target] } = connector
-      const { $: { 'xmi:idref': sourceId = null } } = source
-      const { $: { 'xmi:idref': targetId = null } } = target
-      type = type.replace(/[^\w\s]/gi, '').replace(/\r?\n|\r/g, '')
-      accumulator.connectorIndex[id] = { id, sourceId, targetId, type }
-      for (const element of [source, target]) {
-        const { $: { 'xmi:idref': id }, model: [{ $: { type, name } }] } = element
-        accumulator.elementIndex[id] = { id, type, name }
-      }
-      return accumulator
-    }, { connectorIndex: {}, elementIndex: {} })
-
-  // const parentIndex = getParentIndex(document)
-
-  diagrams = diagrams
-    .map(diagram => {
-      let {
-        elements: [{ element: elements = [] } = {}],
-        properties: [{ $: properties }],
-        project: [{ $: project }]
-      } = diagram
-      let connectors
-      ({ elements = [], connectors = [] } = elements
-        .map(({ $ }) => $)
-        .reduce((accumulator, element) => {
-          const { subject = null, geometry = null } = element
-          if (typeof geometry === 'string') {
-            const { Left: x0, Right: x1, Bottom: y1, Top: y0 } = geometry.replace(/;/g, ' ').trim().split(' ')
-              .reduce((accumulator, vertex) => {
-                const [coordinate, value] = vertex.split('=')
-                accumulator[coordinate] = parseInt(value)
-                return accumulator
-              }, {})
-            element.geometry = [x0, y0, x1 - x0, y1 - y0]
-          }
-          if (subject in elementIndex) accumulator.elements.push({ ...elementIndex[subject], ...element })
-          else if (subject in connectorIndex) accumulator.connectors.push({ ...connectorIndex[subject], ...element })
-          return accumulator
-        }, { elements: [], connectors: [] }))
-      return { ...properties, ...project, elements, connectors }
-    })
-  /*
-  const elementIndex = elements
-    .reduce((accumulator, element) => {
-      let {
-        $: { name = null, 'xmi:idref': id, 'xmi:type': type },
-        properties: [{ $: { documentation = null } = {} }] = [{}],
-        project: [{ $: project = {} }] = [{}],
-        links = null
-      } = element
-      if (Array.isArray(links)) {
-        let { Dependency: dependencies = [], Association: associations = [] } = links[0]
-        associations = associations
-          .map(({ $: { 'xmi:id': id, end, start } }) => ({ id, end, start }))
-        dependencies = dependencies
-          .map(({ $: { 'xmi:id': id, end, start } }) => ({ id, end, start }))
-        links = { dependencies, associations }
-      }
-      const { [id]: parentId = null } = parentIndex
-      element = { id, parentId, type, name, links, documentation, project }
-      accumulator[id] = element
-      return accumulator
-    }, {})
-  */
-  return diagrams
-}
-
 module.exports = {
+  sortElements,
   getDiagrams,
   getBookmarks,
   createBookmark,
-
   createGraph
 }
