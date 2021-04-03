@@ -122,7 +122,7 @@ const styles = {
 }
 
 const getStyle = type => {
-  if (!styles[type]) console.warn(`No style defined for type ${type}`)
+  if (type && !styles[type]) console.warn(`No style defined for type ${type}`)
   const style = styles[type] || ''
   return style
 }
